@@ -18,6 +18,7 @@ agent/        glm.mjs（单次调用）、glm-chat.mjs（对话 agent + --serve 
 home/         她的屋子骨架：PERSONA.md（人格）、README.md；notes/ inbox/ .chat/ 运行时自建
 group-chat/   饭桌：server.mjs + index.html + config.json + say.mjs + 看门狗脚本
 plugins/      DSH 插件：glm-panel（左侧栏聊天面板）、group-chat-panel（/group-chat/* 转发）
+docs/         架构.md：端口、数据落点、两套会话存储、谁在说话、看门狗、三个坑
 ```
 
 ## 快速开始
