@@ -1,0 +1,39 @@
+# 密钥与运行时数据，一律不进仓库
+.key
+*.key
+Api.txt
+
+# 她的屋子：会话、笔记、收件箱都是私人的
+home/.chat/
+home/notes/
+home/inbox/
+home/workshop/
+home/tmp/
+**/room.jsonl
+
+# 模型与运行环境
+models/
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# 日志与临时产物
+logs/
+*.log
+*.pid
+*.tmp
+*.bak-*
+.server.pid
+watch-services.log
+
+# 依赖与打包产物
+node_modules/
+dist/
+*.tgz
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

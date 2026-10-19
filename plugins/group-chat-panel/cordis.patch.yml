@@ -1,0 +1,10 @@
+# group-chat-panel 的 bundle patch
+#
+# 只挂一行：宿主半（index.js）。它只做一件事——
+#   把 /group-chat/* 同源转发到 H:\GLM\group-chat\server.mjs 起的本机服务（127.0.0.1:41300）。
+#
+# 不声明 provider、不建 agent 会话、不注册工具：GLM 的脑子、屋子、围栏全在 H:\GLM\，
+# 这里只是一个「插头」，和 glm-panel 同一套思路。
+- insert:
+    - id: group-chat-panel
+      name: group-chat-panel

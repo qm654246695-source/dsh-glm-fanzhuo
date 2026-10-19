@@ -1,0 +1,31 @@
+{
+  "name": "group-chat-panel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "把 H:\\GLM\\group-chat 的饭桌群聊放上 DSH 左侧栏：一个图标，点开就是群聊页面。宿主半只做 /group-chat/* 的同源转发，不碰 provider、不碰 agent 会话。",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  }
+}

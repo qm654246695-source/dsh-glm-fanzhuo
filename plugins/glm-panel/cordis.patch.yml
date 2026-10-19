@@ -1,0 +1,11 @@
+# glm-panel 的 bundle patch
+#
+# 只挂一行：宿主半（index.js）。它做两件事——
+#   1) 在 DSH 的 Web 服务上注册 /glm-panel/api/* 的转发路由（同源，面板直接 fetch）；
+#   2) 拉起并看住 H:\GLM\agent\glm-chat.mjs --serve 那条本机服务。
+#
+# 不声明 provider、不建 agent 会话、不注册工具 —— 见 index.js 顶部与 H:\GLM\交接.md：
+# 把 GLM 做成宿主 provider = 动 plugin 树，这台机器上已经有过三次「启动即崩」。
+- insert:
+    - id: glm-panel
+      name: glm-panel

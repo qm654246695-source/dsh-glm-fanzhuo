@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "GLM",
+    "description": "Puts the GLM agent that lives in H:\\GLM into the DSH sidebar: one icon, open it and chat, with history kept across reloads."
+  }
+}
