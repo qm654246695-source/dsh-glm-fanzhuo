@@ -4,8 +4,9 @@
 
 两个东西：
 
-- **GLM 工**：命令行单次调用 + 带围栏屋子的可续对话 agent（原生 function calling 六个工具）+ 一个本地 9B 推理服务（GLM-4.6V-Flash，4-bit，16 GB 显卡可跑）。
-- **饭桌**：一个本地群聊，用户可以同时和几个 AI 说话（本仓库自带「肥鱼」「GLM」两个人格位，可自己加）。成员之间看得到彼此的发言，可以 @ 点名、可以单独喊某一位插话。
+- **GLM 工**：命令行单次调用 + 带围栏屋子的可续对话 agent（原生 function calling 七个工具，含
+  `read_image` 看图）+ 一个本地 9B 推理服务（GLM-4.6V-Flash，4-bit，16 GB 显卡可跑）。
+- **饭桌**：一个本地群聊，用户可以同时和几个 AI 说话（本仓库自带「肥鱼」「GLM」两个人格位，可自己加）。成员之间看得到彼此的发言，可以 @ 点名、可以单独喊某一位插话。她还能往 `home/outbox/` 丢 `.md`，群聊每 2 秒收一次当「主动开口」。
 - 附带两个 **DSH 左侧栏插件**（`plugins/`）：`glm-panel`（单聊面板）与 `group-chat-panel`（饭桌的同源转发）。
 
 > 仓库**不含模型权重**。19 GB 的权重请自己按下面「本地 9B」一节下载。
@@ -18,7 +19,7 @@ agent/        glm.mjs（单次调用）、glm-chat.mjs（对话 agent + --serve 
 home/         她的屋子骨架：PERSONA.md（人格）、README.md；notes/ inbox/ .chat/ 运行时自建
 group-chat/   饭桌：server.mjs + index.html + config.json + say.mjs + 看门狗脚本
 plugins/      DSH 插件：glm-panel（左侧栏聊天面板）、group-chat-panel（/group-chat/* 转发）
-docs/         架构.md：端口、数据落点、两套会话存储、谁在说话、看门狗、三个坑
+docs/         架构.md：端口、数据落点、两套会话存储、谁在说话、眼睛与信箱、看门狗、纯本地、三个坑
 ```
 
 ## 快速开始
@@ -69,12 +70,15 @@ agent\start-local-glm.bat      # 127.0.0.1:11434，bnb 4-bit
 | 饭桌 | `127.0.0.1:41300` | `GROUP_PORT` 可改；`/say` `/nudge` `/state` `/events`(SSE) |
 | 面板后端 | `127.0.0.1:41234` | `glm-chat.mjs --serve`，端口写 `home/.chat/server.json` |
 | 本地 9B | `127.0.0.1:11434` | `GLM_LOCAL_BASE` 可改 |
-| 后端开关 | `home/.chat/backend` | 写 `local` 或 `cloud`，插件 30 秒内自动切换 |
+| 后端开关 | `home/.chat/backend` | 写 `local`（纯本地，失败不兜云）/ `cloud` / `auto`（分流互兜），插件 30 秒内自动切换 |
 
 环境变量：`GLM_API_KEY`、`GLM_BASE`、`GLM_LOCAL_BASE`、`GLM_HOME`、`GROUP_PORT`、`GLM_VERBOSE`、`GLM_SHOW_USAGE`。
 
 ## 踩过的坑（写下来省你两天）
 
+- **端口活着 ≠ 服务活着**：本地 9B 会「假活」——`/health` 照回 200，但所有生成请求永远不响应（生成被中断过一次之后）。看门狗必须发一次极小生成（比如 1 token）才判得出来，只探端口会一直报 ok。真挂了就杀掉重拉，加载约 30 秒。
+- **纯本地下别把「本地暂时不可达」当降级**：9B 重启那几十秒里如果面板把 local 服务换成 cloud，既违背「纯本地」又把在途对话掐断。规则应是保留现有 local 服务，等它回来。
+- **图片别落进会话 jsonl**：看图给模型的是 data URL，但**落盘只存路径**，否则会话文件涨到 MB 级、每轮重喂整张图。
 - **思考型模型会「只思考不出正文」**：5.3 系列给多少 `max_tokens` 就往 reasoning 里烧多少。`glm.mjs` 内置三轮重试（原样 → 加长 → 8192+降 effort）。`reasoning_effort` 只认 `low|high|max`。
 - **`thinking:{type:"disabled"}` 对 5.3 系列无效**（HTTP 400 `1210`），对 4.6/5.2/5-turbo 有效。
 - **GLM 的工具调用是文本 XML**（`<tool_call>name<arg_key>…`），`local_glm_server.py` 把它解析回 OpenAI `tool_calls`。

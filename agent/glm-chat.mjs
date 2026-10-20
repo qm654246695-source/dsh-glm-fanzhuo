@@ -49,7 +49,28 @@ const CLOUD = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
 // 本地后端：Ollama 的 OpenAI 兼容端点（她 H: 盘上的那份 9B）
 const LOCAL = process.env.GLM_LOCAL_BASE || 'http://127.0.0.1:11434/v1/chat/completions';
 let BASE = process.env.GLM_BASE || CLOUD;
+const LOCAL_TIMEOUT_MS = Number(process.env.GLM_LOCAL_TIMEOUT_MS) || 180000;
+const PURE_LOCAL = process.env.GLM_PURE_LOCAL === '1';
 let isLocal = /127\.0\.0\.1|localhost/.test(BASE);
+
+// ── 自动分流：轻短任务走本地 9B，长/重任务走云端 ─────────────────────────
+// 开关在 home\.chat\backend：local / cloud / auto（不写也按 auto 算）。
+// 显式传了 --local / --base 的调用（CLI、opts.base）不受这里影响。
+const BACKEND_FILE = join(CHAT, 'backend');
+function currentMode() {
+  if (process.env.GLM_MODE) return process.env.GLM_MODE.trim().toLowerCase();
+  try { return readFileSync(BACKEND_FILE, 'utf8').trim().toLowerCase(); } catch { return ''; }
+}
+function pickRoute(text) {
+  const mode = currentMode();
+  const t = String(text || '');
+  if (mode === 'local') return { auto: false, base: LOCAL, local: true, why: 'backend=local' };
+  if (mode === 'cloud') return { auto: false, base: CLOUD, local: false, why: 'backend=cloud' };
+  const long = t.length >= 120;
+  const heavy = /(写|整理|分析|总结|报告|方案|设计|重构|比较|规划|文档|代码|为什么|解释|评估|复盘)/.test(t);
+  const cloud = long || heavy;
+  return { auto: true, base: cloud ? CLOUD : LOCAL, local: !cloud, why: long ? '长任务' : heavy ? '重任务' : '轻短' };
+}
 
 const DEFAULT_PERSONA = `你是 GLM（智谱 z.ai 训练的大模型），现在被请到一台 Windows 机器上，有自己的工作区和一条能续上的对话线。
 
@@ -89,7 +110,11 @@ function loadPersona() {
 // 想往盘上别处走就写 ..\workshop\…（也吃绝对路径 H:\GLM\…）。
 const normPath = (p) => p.replace(/[\\/]+$/, '').toLowerCase();
 function safePath(rel, { write = false } = {}) {
-  const abs = resolve(HOME, rel || '.');
+  let r = String(rel || '.').trim();
+  // 防呆：模型常把「相对屋子的路径」再写成 home/notes/x，结果落进 home\home\notes。
+  // 相对路径里开头的 home/ 或 home\ 一律去掉（绝对路径不动，交给下面按前缀判）。
+  if (!/^[a-zA-Z]:[\\/]/.test(r) && /^home[\\/]/i.test(r)) r = r.replace(/^home[\\/]+/i, '') || '.';
+  const abs = resolve(HOME, r);
   // 坑：跨盘符时 relative() 会把目标原样返回（不带 ..），旧写法就漏了 —— 改按前缀直接比。
   const root = normPath(ROOT);
   const target = normPath(abs);
@@ -119,6 +144,14 @@ const TOOLS = [
       name: 'read_file',
       description: '读你盘上一个文本文件（最多 20000 字）；agent、models、venv 也能读，只是不能写',
       parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_image',
+      description: '看你盘上一张图片，画面会真正出现在你眼前（不是文本）。支持 PNG/JPEG/GIF/BMP/WEBP，按文件魔数认，不看扩展名。相对路径按屋子算（.. 是 H:\\GLM 根）。最大 10 MB，超出回「太大」',
+      parameters: { type: 'object', properties: { path: { type: 'string', description: '图片路径，如 inbox/梗图/shenshen-zuifei.png' } }, required: ['path'] },
     },
   },
   {
@@ -155,6 +188,16 @@ const TOOLS = [
   },
 ];
 
+// 按魔数认图（GLM 写的表：PNG/JPEG/GIF/BMP/WEBP）
+const IMAGE_MIME = (buf) => {
+  if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.length >= 4 && buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return 'image/gif';
+  if (buf.length >= 2 && buf[0] === 0x42 && buf[1] === 0x4d) return 'image/bmp';
+  if (buf.length >= 12 && buf.slice(0, 4).toString() === 'RIFF' && buf.slice(8, 12).toString() === 'WEBP') return 'image/webp';
+  return null;
+};
+
 function runTool(call) {
   let args = {};
   try { args = JSON.parse(call.function.arguments || '{}'); } catch { /* 空参数 */ }
@@ -169,6 +212,15 @@ function runTool(call) {
       const abs = safePath(args.path);
       const txt = readFileSync(abs, 'utf8');
       return txt.length > 20000 ? txt.slice(0, 20000) + '\n…（已截断）' : txt;
+    }
+    if (name === 'read_image') {
+      const abs = safePath(args.path);
+      if (statSync(abs).isDirectory()) return '这是个目录，不是文件';
+      const buf = readFileSync(abs);
+      if (buf.length > 10 * 1024 * 1024) return '图片太大（>10MB），看不了这张';
+      const mime = IMAGE_MIME(buf);
+      if (!mime) return '这不是图片文件（魔数不认），不装图';
+      return { __image: true, mime, base64: buf.toString('base64') };
     }
     if (name === 'write_file') {
       const abs = safePath(args.path, { write: true });
@@ -346,25 +398,35 @@ function listSessions() {
 
 // —— 调模型 ——
 function buildBody(model, messages, opts = {}) {
+  const local = opts.local ?? isLocal;
   const body = { model, messages, max_tokens: opts.max || 2048 };
   if (opts.tools !== false) body.tools = TOOLS;
-  // 本地 Ollama 后端不认 thinking / reasoning_effort
-  if (!isLocal && opts.think === false) body.thinking = { type: 'disabled' };
-  if (!isLocal && opts.effort) body.reasoning_effort = opts.effort;
+  // 本地后端不认 thinking / reasoning_effort
+  if (!local && opts.think === false) body.thinking = { type: 'disabled' };
+  if (!local && opts.effort) body.reasoning_effort = opts.effort;
   return body;
 }
 
 async function callGLM(model, messages, opts = {}) {
   const body = buildBody(model, messages, opts);
-  const r = await fetch(BASE, {
+  const local = opts.local ?? isLocal;
+  const r = await fetch(opts.base || BASE, {
     method: 'POST',
     headers: { Authorization: `Bearer ${readKey()}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    signal: opts.signal,
+    signal: opts.signal || (local ? AbortSignal.timeout(LOCAL_TIMEOUT_MS) : undefined),
   });
   const raw = await r.text();
   if (!r.ok) throw new Error(`HTTP ${r.status}: ${raw}`);
   return JSON.parse(raw);
+}
+
+/** 这一轮失败时换另一个后端（本地↔云端）。 */
+function altRoute(opts) {
+  const onLocal = (opts.base || BASE) === LOCAL;
+  return onLocal
+    ? { base: CLOUD, local: false, model: 'glm-5.3-flash' }
+    : { base: LOCAL, local: true, model: 'glm-local' };
 }
 
 /**
@@ -374,11 +436,12 @@ async function callGLM(model, messages, opts = {}) {
 async function streamGLM(model, messages, opts = {}) {
   const body = buildBody(model, messages, opts);
   body.stream = true;
-  const r = await fetch(BASE, {
+  const local = opts.local ?? isLocal;
+  const r = await fetch(opts.base || BASE, {
     method: 'POST',
     headers: { Authorization: `Bearer ${readKey()}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    signal: opts.signal,
+    signal: opts.signal || (local ? AbortSignal.timeout(LOCAL_TIMEOUT_MS) : undefined),
   });
   if (!r.ok) {
     const raw = await r.text();
@@ -453,7 +516,33 @@ async function streamGLM(model, messages, opts = {}) {
  * stream=true 时走 SSE，否则一次性返回。
  */
 async function turn(sessionId, model, userText, onText, opts = {}) {
-  const msgs = [{ role: 'system', content: loadPersona() }, ...loadMessages(sessionId).map((m) => m.msg)];
+  // 自动分流：没显式指定 base 时，按 home\.chat\backend（local/cloud/auto）决定这一轮走哪儿
+  if (!opts.base) {
+    const pick = pickRoute(userText);
+    opts = { ...opts, base: pick.base, local: pick.local };
+    if (pick.local) {
+      model = 'glm-local';
+    } else if (!model || model === 'glm-local') {
+      model = 'glm-5.3-flash';
+    }
+    if (pick.auto) {
+      console.log(`[route] ${pick.local ? 'local' : 'cloud'}（${pick.why}，${String(userText || '').length} 字）`);
+    }
+  }
+  const msgs = [{ role: 'system', content: loadPersona() }];
+  // 历史裁剪：本地 9B 扛不动几万字的长史（会慢到像卡死），只带最近几条并截断超长文本；
+  // 云端也给个上限，别让 800KB 的会话把 token 烧穿。
+  const cap = opts.local ? 10 : 40;
+  const hist = loadMessages(sessionId).slice(-cap).map((m) => {
+    const msg = m.msg || {};
+    if (typeof msg.content === 'string' && msg.content.length > (opts.local ? 1200 : 6000)) {
+      return { ...m, msg: { ...msg, content: msg.content.slice(0, opts.local ? 1200 : 6000) + '\n…（已截断）' } };
+    }
+    return m;
+  }).map((m) => m.msg);
+  // 第一条必须是 user，否则丢掉（避免 tool 结果没有配对的 tool_calls）
+  while (hist.length && hist[0].role !== 'user') hist.shift();
+  msgs.push(...hist);
   const userMsg = { role: 'user', content: userText };
   msgs.push(userMsg);
   saveMessage(sessionId, { t: new Date().toISOString(), msg: userMsg });
@@ -464,7 +553,20 @@ async function turn(sessionId, model, userText, onText, opts = {}) {
     let j = null;
 
     if (opts.stream) {
-      const r = await streamGLM(model, msgs, opts);
+      let r;
+      try {
+        r = await streamGLM(model, msgs, opts);
+      } catch (e) {
+        if (process.env.GLM_PURE_LOCAL === '1' || currentMode() === 'local') throw e;   // 纯本地：失败就报错，不借云端
+        // 本地挂了/超时 → 这一轮改走另一个后端
+        const alt = altRoute(opts);
+        console.log(`[route] fallback → ${alt.local ? 'local' : 'cloud'}（${String(e && e.message || e).slice(0, 60)}）`);
+        const jj = await callGLM(alt.model, msgs, { ...opts, base: alt.base, local: alt.local });
+        const m = jj.choices?.[0]?.message || {};
+        if (m.content) opts.onDelta?.(m.content);
+        r = { message: m, finishReason: jj.choices?.[0]?.finish_reason };
+        opts.base = alt.base; opts.local = alt.local; model = alt.model;
+      }
       msg = r.message;
       finishReason = r.finishReason;
       // 白想了：正文空、也没调工具 → 降档重问一次（一次性请求，结果整体补发）
@@ -480,7 +582,15 @@ async function turn(sessionId, model, userText, onText, opts = {}) {
         } catch { /* 降档也不成，就走下面的空正文分支 */ }
       }
     } else {
-      j = await callGLM(model, msgs, opts);
+      try {
+        j = await callGLM(model, msgs, opts);
+      } catch (e) {
+        if (process.env.GLM_PURE_LOCAL === '1' || currentMode() === 'local') throw e;
+        const alt = altRoute(opts);
+        console.log(`[route] fallback → ${alt.local ? 'local' : 'cloud'}（${String(e && e.message || e).slice(0, 60)}）`);
+        j = await callGLM(alt.model, msgs, { ...opts, base: alt.base, local: alt.local });
+        opts.base = alt.base; opts.local = alt.local; model = alt.model;
+      }
       msg = j.choices?.[0]?.message || {};
       finishReason = j.choices?.[0]?.finish_reason;
       if (!msg.tool_calls?.length && !(msg.content || '').trim()) {
@@ -511,10 +621,30 @@ async function turn(sessionId, model, userText, onText, opts = {}) {
     }
     for (const call of msg.tool_calls) {
       opts.onTool?.({ name: call.function.name, args: call.function.arguments });
-      const out = runTool(call);
-      const tm = { role: 'tool', tool_call_id: call.id, content: out };
+      let out = runTool(call);
+      let tm;
+      let persist;   // 写进 jsonl 的版本（图片只存路径，不存 base64）
+      let targs = {};
+      try { targs = JSON.parse(call.function.arguments || '{}'); } catch { /* 空参数 */ }
+      if (out && typeof out === 'object' && out.__image) {
+        // 这一轮给模型的是视觉内容块；落 jsonl 的只存短文本，别让 base64 撑爆会话文件、
+        // 也别让历史回放时每轮把图重新喂给模型（2026-10-20 实测发现原实现把整张图存进去了）
+        tm = {
+          role: 'tool',
+          tool_call_id: call.id,
+          content: [
+            { type: 'image_url', image_url: { url: `data:${out.mime};base64,${out.base64}` } },
+            { type: 'text', text: `（图片 ${targs.path || ''}，${out.mime}）` },
+          ],
+        };
+        out = `已读图：${targs.path || ''}（${out.mime}）`;
+        persist = { role: 'tool', tool_call_id: call.id, content: out };
+      } else {
+        tm = { role: 'tool', tool_call_id: call.id, content: out };
+        persist = tm;
+      }
       msgs.push(tm);
-      saveMessage(sessionId, { t: new Date().toISOString(), msg: tm, tool: call.function.name });
+      saveMessage(sessionId, { t: new Date().toISOString(), msg: persist, tool: call.function.name });
       opts.onToolResult?.({ name: call.function.name, out });
       if (process.env.GLM_VERBOSE) process.stderr.write(`  · ${call.function.name} → ${out.slice(0, 80).replace(/\n/g, ' ')}\n`);
     }
@@ -678,6 +808,10 @@ function startServer(preferredPort) {
           think: body.think === false ? false : undefined,
           effort: body.effort || undefined,
         };
+        // 按入口强制路由（群聊那边传 route=cloud/local/auto；面板不传就按 backend 文件自动分流）
+        const route = String(body.route || '').trim().toLowerCase();
+        if (route === 'cloud') { opts.base = CLOUD; opts.local = false; }
+        else if (route === 'local') { opts.base = LOCAL; opts.local = true; }
         const ac = new AbortController();
         opts.signal = ac.signal;
         running.set(sid, ac);

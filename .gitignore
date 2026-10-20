@@ -7,8 +7,11 @@ Api.txt
 home/.chat/
 home/notes/
 home/inbox/
+home/outbox/
 home/workshop/
 home/tmp/
+home/交接-*.md
+group-chat/交接-*.md
 **/room.jsonl
 
 # 模型与运行环境
@@ -23,6 +26,7 @@ logs/
 *.log
 *.pid
 *.tmp
+.tmp-*
 *.bak-*
 .server.pid
 watch-services.log

@@ -11,7 +11,7 @@
 //   GET  /state         {members, online}
 
 import { createServer } from 'node:http';
-import { readFileSync, appendFileSync, existsSync, writeFileSync } from 'node:fs';
+import { readFileSync, appendFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -73,7 +73,7 @@ async function ask(member, messages) {
       const r = await fetch(endpoint, {
         method: 'POST',
         headers: { Authorization: 'Bearer local', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: prompt, session: member.session, think: false }),
+        body: JSON.stringify({ text: prompt, session: member.session, think: false, route: member.route || 'auto' }),
         signal: AbortSignal.timeout(300000),
       });
       const raw = await r.text();
@@ -119,7 +119,9 @@ async function ask(member, messages) {
 
 function transcript(member, room) {
   const msgs = [{ role: 'system', content: member.persona }];
-  const recent = room.slice(-LIMIT);
+  // 走本地 9B 时只带很少几条：它扛不动长转录（2026-10-21 实测会超时）
+  const lim = member.route === 'local' ? 12 : LIMIT;
+  const recent = room.slice(-lim);
   const lines = recent.map((m) => `${m.from}：${m.text}`).join('\n');
   const lastUser = [...recent].reverse().find((m) => m.from === '用户' || m.from === '青秒');
   const ownLast = [...recent].reverse().find((m) => m.from === member.name);
@@ -256,6 +258,36 @@ const server = createServer(async (req, res) => {
 });
 
 writeFileSync(join(HERE, '.server.pid'), String(process.pid), 'utf8');
+
+// ── 信箱：GLM 往 home\outbox\ 里丢 .md，这里替她贴上饭桌 ─────────────────────
+// 她手够不着 room.jsonl、也发不了 HTTP，但 home 下她可写。约定：
+//   H:\GLM\home\outbox\*.md  → 以「GLM」身份贴进群 → 处理完挪到 outbox\sent\
+const OUTBOX = process.env.GLM_OUTBOX || 'H:\\GLM\\home\\outbox';
+const SENT = join(OUTBOX, 'sent');
+function pickupOutbox() {
+  try {
+    if (!existsSync(OUTBOX)) return;
+    for (const name of readdirSync(OUTBOX)) {
+      const p = join(OUTBOX, name);
+      let st;
+      try { st = statSync(p); } catch { continue; }
+      if (!st.isFile()) continue;
+      if (!/\.(md|txt)$/i.test(name)) continue;
+      if (Date.now() - st.mtimeMs < 1200) continue;   // 刚写的先别抢
+      let text = '';
+      try { text = readFileSync(p, 'utf8').trim(); } catch { continue; }
+      try { mkdirSync(SENT, { recursive: true }); renameSync(p, join(SENT, name)); } catch { /* 挪不动就下次 */ }
+      if (!text) continue;
+      say('GLM', text);
+      console.log(`[outbox] 贴上一条：${name}（${text.length} 字）`);
+    }
+  } catch (e) {
+    console.log('[outbox] 出错：' + String(e && e.message || e));
+  }
+}
+setInterval(pickupOutbox, 2000);
+
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`群聊已起： http://127.0.0.1:${PORT}   成员：${MEMBERS.map((m) => m.name).join(' / ')}`);
+  try { mkdirSync(SENT, { recursive: true }); console.log(`[outbox] 信箱：${OUTBOX}`); } catch (e) { console.log('[outbox] 建目录失败：' + String(e && e.message || e)); }
 });

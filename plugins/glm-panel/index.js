@@ -139,6 +139,14 @@ async function ensureUp() {
         info = running; // 现成的服务后端正好对上，直接接上
         return info;
       }
+      // 纯本地：配置要 local、现有服务也是 local —— 11434 只是暂时没起来（重启/加载模型几十秒），
+      // 不能因为这一下就把它换成 cloud 再换回来：每换一次都掐断在途对话，而且用户明确要求
+      //「纯本地、失败不兜云端」。2026-10-21 演练 9B 重启时踩到，面板把 local 服务杀了换 cloud。
+      if (modeOf(h) === 'local' && readBackend() === 'local') {
+        note('本地 9B 暂时不可达，保留现有 local 服务（纯本地，不兜云端）');
+        info = running;
+        return info;
+      }
       // 只在目标后端**确实可用**时才换人；否则「杀了云端又拉不起本地」会来回抖（踩过）
       if (h.pid) {
         note(`现有服务是 ${modeOf(h)}，目标 ${target}，让它退出（pid=${h.pid}）`);
@@ -175,8 +183,13 @@ function spawnServer(preferredMode) {
     wantedMode = readBackend();
     let mode = preferredMode || wantedMode;
     if (mode === 'local' && !(await localUp())) {
-      mode = 'cloud';
-      note(`本地后端 127.0.0.1:${LOCAL_PORT} 没响应，这次先用 cloud（配置仍是 local，等它起来会自动切回去）`);
+      if (wantedMode === 'local') {
+        // 纯本地模式：11434 正在重启/加载也别偷偷兜云端，等它回来（请求会报错，但不会跑云端）
+        note(`本地后端 127.0.0.1:${LOCAL_PORT} 还没起（重启/加载中），按纯本地拉起，不兜云端`);
+      } else {
+        mode = 'cloud';
+        note(`本地后端 127.0.0.1:${LOCAL_PORT} 没响应，这次先用 cloud（配置仍是 local，等它起来会自动切回去）`);
+      }
     }
     const args = [AGENT, '--serve', ...(mode === 'local' ? ['--local'] : []), '--port', String(PREFERRED_PORT)];
     note(`拉起服务：${node} ${args.join(' ')}（backend=${mode}）`);
