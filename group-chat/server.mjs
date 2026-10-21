@@ -64,10 +64,54 @@ async function ask(member, messages) {
     return (JSON.parse(raw).choices?.[0]?.message?.content || '').trim();
   }
 
+// —— 会话轮换（2026-10-22）——
+// 群里的 GLM 一直用一条专用会话说（20261019-2300），它会越滚越大。超过阈值就自动换新：
+// 新建一个空 jsonl（serve 只认「文件已存在」的 session id），把新 id 写回 config.json，
+// 并在群里落一条系统消息。旧会话留着不删。不用她自己动手，服务端在她开口前做。
+const GLM_HOME = process.env.GLM_HOME || 'H:\\GLM\\home';
+const SESSION_MAX_MB = Number(CONFIG.sessionMaxMB || 1);
+
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+function writeConfig() {
+  const p = join(HERE, 'config.json');
+  const tmp = p + '.tmp';
+  writeFileSync(tmp, JSON.stringify(CONFIG, null, 2) + '\n', 'utf8');
+  renameSync(tmp, p);
+}
+
+function rotateSessionIfNeeded(member) {
+  try {
+    if (member.kind !== 'glmserve' || !member.session) return;
+    const home = member.serviceHome || GLM_HOME;
+    const dir = join(home, '.chat', 'panel', 'sessions');
+    const file = join(dir, member.session + '.jsonl');
+    if (!existsSync(file)) return;
+    const size = statSync(file).size;
+    if (size < SESSION_MAX_MB * 1024 * 1024) return;
+    const now = new Date();
+    const base = `${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}-` +
+      `${pad2(now.getHours())}${pad2(now.getMinutes())}${pad2(now.getSeconds())}`;
+    mkdirSync(dir, { recursive: true });
+    let sid = base;
+    let k = 1;
+    while (existsSync(join(dir, sid + '.jsonl'))) { sid = `${base}-${k++}`; }
+    writeFileSync(join(dir, sid + '.jsonl'), '', 'utf8');
+    const old = member.session;
+    member.session = sid;
+    writeConfig();
+    console.log(`[session] rotate ${member.id}: ${old} (${(size / 1048576).toFixed(2)} MB) -> ${sid}`);
+    say('系统', `${member.name} 的群会话到 ${(size / 1048576).toFixed(2)} MB，已自动换新会话 ${sid}（旧的 ${old} 保留）`);
+  } catch (e) {
+    console.log('[session] rotate failed: ' + String(e && e.message || e));
+  }
+}
+
   // glmserve：走她带工具的那条服务（glm-chat.mjs --serve），用一条**专用会话**，
   // 这样她在群里说「改好了」是真能落纸的，而不会和面板当前那条会话搅在一起。
   if (member.kind === 'glmserve') {
     const endpoint = member.endpoint || 'http://127.0.0.1:41234/send';
+    rotateSessionIfNeeded(member);   // 会话太大就先换新的，再说这一轮
     const prompt = messages[messages.length - 1]?.content || '';
     try {
       const r = await fetch(endpoint, {
