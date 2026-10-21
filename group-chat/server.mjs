@@ -123,15 +123,21 @@ function transcript(member, room) {
   const lim = member.route === 'local' ? 12 : LIMIT;
   const recent = room.slice(-lim);
   const lines = recent.map((m) => `${m.from}：${m.text}`).join('\n');
-  const lastUser = [...recent].reverse().find((m) => m.from === '用户' || m.from === '青秒');
+  const lastUser = [...recent].reverse().find((m) => ['用户', '青秒', '肥鱼'].includes(m.from));
   const ownLast = [...recent].reverse().find((m) => m.from === member.name);
+  // 2026-10-21：肥鱼在群里是调度，他发的「任务卡」不能按闲聊处理，否则会被「说一两三句」带偏
+  // （实测：肃正把整张卡复述一遍、工具调用还没发干净就回了「写好了」）。
+  const isCard = /任务卡/.test((lastUser && lastUser.text) || '');
   msgs.push({
     role: 'user',
     content: `以下是群聊最近的记录（按时间顺序）：\n${lines}\n\n` +
       `最新话题（用户说的）：${lastUser ? lastUser.text : '（还没有新话题）'}\n` +
       (ownLast ? `你上一条说的是：${ownLast.text.slice(0, 120)}\n` : '') +
-      `现在轮到你（${member.name}）说话：针对最新话题说一两三句，**不要重复你上一条的原句**（例如别再说"没做"）。` +
-      `只输出你要说的话，别写名字前缀，别替别人说话。`,
+      (isCard
+        ? `现在轮到你（${member.name}）：这是一张**任务卡**，照它执行。先动手再做报告，报告只写「结果 + 证据」（路径、行数、你实际拿到的数字）；` +
+          `不要复述你调用了什么工具，不要贴工具返回的原文，不要写「我会调用…」。没做完就说还差哪一步。`
+        : `现在轮到你（${member.name}）说话：针对最新话题说一两三句，**不要重复你上一条的原句**（例如别再说"没做"）。` +
+          `只输出你要说的话，别写名字前缀，别替别人说话。`),
   });
   return msgs;
 }

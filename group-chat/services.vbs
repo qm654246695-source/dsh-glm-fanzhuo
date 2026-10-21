@@ -5,4 +5,5 @@ Dim sh
 Set sh = CreateObject("WScript.Shell")
 sh.Run "cmd /c ""H:\GLM\agent\start-local-glm.bat""", 0, False
 sh.Run "cmd /c ""H:\GLM\group-chat\start.bat""", 0, False
+sh.Run "cmd /c ""F:\DSH\tools\start-suzheng-serve.bat""", 0, False
 Set sh = Nothing

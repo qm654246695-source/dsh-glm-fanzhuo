@@ -21,7 +21,7 @@
 // 本文件既是可以直接跑的 CLI，也是 DSH 插件（glm-panel）拉起的那条服务：
 // 面板和命令行共用同一份 turn()/工具集/围栏，不另写一套。
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, statSync, statfsSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, statSync, statfsSync, unlinkSync, renameSync, cpSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, join, resolve, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -33,7 +33,10 @@ const HOME = process.env.GLM_HOME || resolve(HERE, '..', 'home');
 // 整块 H: 盘都是她的：读 = H:\GLM 全树（agent / models / venv 也能看）；
 // 写 = 屋子 home、工坊 workshop、草稿堆 tmp —— 别处只读，防她把自己拆了。
 const ROOT = process.env.GLM_ROOT || resolve(HOME, '..');
-const WRITABLE = ['home', 'workshop', 'tmp'].map((d) => join(ROOT, d));
+// 写白名单：默认 home / workshop / tmp；GLM_EXTRA_WRITABLE（分号分隔）可给第二个实例
+// 多开一两个目录 —— 例如肃正协议那头要把「台账」也放开，才能自己落纸（2026-10-21）。
+const WRITABLE = ['home', 'workshop', 'tmp', ...String(process.env.GLM_EXTRA_WRITABLE || '')
+  .split(';').map((s) => s.trim()).filter(Boolean)].map((d) => join(ROOT, d));
 const CHAT = join(HOME, '.chat');
 // 两套会话目录，互不相干：
 //   命令行（这个脚本直接跑）→ .chat\sessions\ + .chat\current
@@ -65,11 +68,13 @@ function pickRoute(text) {
   const mode = currentMode();
   const t = String(text || '');
   if (mode === 'local') return { auto: false, base: LOCAL, local: true, why: 'backend=local' };
-  if (mode === 'cloud') return { auto: false, base: CLOUD, local: false, why: 'backend=cloud' };
+  // 云端一律走 BASE（= GLM_BASE，没配就是智谱）。原先写死 CLOUD，第二个实例（肃正，
+  // GLM_BASE=api.deepseek.com）会被拽回智谱端点，拿 deepseek key 换 401（2026-10-21 踩过）。
+  if (mode === 'cloud') return { auto: false, base: BASE, local: false, why: 'backend=cloud' };
   const long = t.length >= 120;
   const heavy = /(写|整理|分析|总结|报告|方案|设计|重构|比较|规划|文档|代码|为什么|解释|评估|复盘)/.test(t);
   const cloud = long || heavy;
-  return { auto: true, base: cloud ? CLOUD : LOCAL, local: !cloud, why: long ? '长任务' : heavy ? '重任务' : '轻短' };
+  return { auto: true, base: cloud ? BASE : LOCAL, local: !cloud, why: long ? '长任务' : heavy ? '重任务' : '轻短' };
 }
 
 const DEFAULT_PERSONA = `你是 GLM（智谱 z.ai 训练的大模型），现在被请到一台 Windows 机器上，有自己的工作区和一条能续上的对话线。
@@ -89,9 +94,14 @@ const DEFAULT_PERSONA = `你是 GLM（智谱 z.ai 训练的大模型），现在
 4. 不确定的事说"不确定"，不要编。`;
 
 function readKey() {
-  if (process.env.GLM_API_KEY) return process.env.GLM_API_KEY.trim();
-  for (const p of [join(HERE, '.key'), join(process.env.USERPROFILE || '', '.glm.key')]) {
-    if (p && existsSync(p)) return readFileSync(p, 'utf8').trim().split(/\r?\n/)[0].trim();
+  // HTTP 头只吃 Latin-1：key 里混进中文注释/全角字符（Api.txt 常见）时 fetch 会报
+  // "Cannot convert argument to a ByteString"（2026-10-21 实测），所以一律先剔掉非 ASCII。
+  const clean = (s) => String(s || '').replace(/[^\x20-\x7E]/g, '').trim();
+  if (process.env.GLM_API_KEY) return clean(process.env.GLM_API_KEY);
+  // 顺序要紧：先看自己家（HOME\.key），再退到脚本边上（H:\GLM\agent\.key）——第二个实例
+  // （肃正协议）不能去捡 GLM 的智谱 key，否则会把智谱 key 发去 api.deepseek.com 换 401。
+  for (const p of [join(HOME, '.key'), join(HERE, '.key'), join(process.env.USERPROFILE || '', '.glm.key')]) {
+    if (p && existsSync(p)) return clean(readFileSync(p, 'utf8').trim().split(/\r?\n/)[0]);
   }
   if (isLocal) return 'local';
   throw new Error('没有 GLM key：设环境变量 GLM_API_KEY，或在 glm.mjs 边上放 .key');
@@ -173,6 +183,14 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'move_path',
+      description: '把文件或整个目录挪到另一个位置（同盘重命名，目标父目录自动创建）。只能在自己的可写区里挪；目标已存在会拒绝。没有删除能力——想"清理"就挪进 backup\\',
+      parameters: { type: 'object', properties: { from: { type: 'string', description: '源路径' }, to: { type: 'string', description: '目标路径' } }, required: ['from', 'to'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'find_files',
       description: '按文件名关键字在你盘上找文件（跳过 models / venv 这种大块头）',
       parameters: { type: 'object', properties: { keyword: { type: 'string' } }, required: ['keyword'] },
@@ -233,6 +251,23 @@ function runTool(call) {
       mkdirSync(dirname(abs), { recursive: true });
       appendFileSync(abs, args.content ?? '', 'utf8');
       return '已追加 ' + (args.content ?? '').length + ' 字 → ' + args.path;
+    }
+    if (name === 'move_path') {
+      // 只搬不删：源和目标都必须在可写区；目标已存在就拒绝（避免无声覆盖别人的东西）
+      const src = safePath(args.from, { write: true });
+      const dst = safePath(args.to, { write: true });
+      if (!existsSync(src)) return '源不存在：' + args.from;
+      if (existsSync(dst)) return '目标已存在，没有覆盖：' + args.to;
+      if (normPath(dst).startsWith(normPath(src) + sep)) return '不能把目录挪进它自己里面';
+      mkdirSync(dirname(dst), { recursive: true });
+      try {
+        renameSync(src, dst);
+      } catch (e) {
+        // 跨盘等情况：复制再删源（只在这条路径上落成）
+        cpSync(src, dst, { recursive: true });
+        rmSync(src, { recursive: true, force: true });
+      }
+      return '已挪：' + args.from + ' → ' + args.to;
     }
     if (name === 'find_files') {
       const kw = String(args.keyword || '').toLowerCase();
@@ -428,7 +463,7 @@ async function callGLM(model, messages, opts = {}) {
 function altRoute(opts) {
   const onLocal = (opts.base || BASE) === LOCAL;
   return onLocal
-    ? { base: CLOUD, local: false, model: 'glm-5.3-flash' }
+    ? { base: BASE, local: false, model: process.env.GLM_MODEL || 'glm-5.3-flash' }
     : { base: LOCAL, local: true, model: 'glm-local' };
 }
 
@@ -813,7 +848,7 @@ function startServer(preferredPort) {
         };
         // 按入口强制路由（群聊那边传 route=cloud/local/auto；面板不传就按 backend 文件自动分流）
         const route = String(body.route || '').trim().toLowerCase();
-        if (route === 'cloud') { opts.base = CLOUD; opts.local = false; }
+        if (route === 'cloud') { opts.base = BASE; opts.local = false; }
         else if (route === 'local') { opts.base = LOCAL; opts.local = true; }
         const ac = new AbortController();
         opts.signal = ac.signal;
@@ -933,6 +968,11 @@ async function main() {
     usePanelScope();
     const info = await startServer(port);
     console.log(`glm-chat --serve  listening on http://127.0.0.1:${info.port}  home=${HOME}  sessions=${SESS}`);
+    // 诊断用：底座/模型/白名单一眼可见（2026-10-21 排查第二个实例时加的）
+    console.log(`  boot: base=${BASE} model=${process.env.GLM_MODEL || '-'} root=${ROOT} writable=${WRITABLE.join(',')} model_default=${model}`);
+    // key 只报长度和前缀，别把值写进日志
+    try { const k = readKey() || ''; console.log(`  key: len=${k.length} prefix=${k.slice(0, 5)} env=${process.env.GLM_API_KEY ? 'yes' : 'no'}`); }
+    catch (e) { console.log('  key: ' + String(e && e.message || e)); }
     return; // 服务常驻，靠信号退出
   }
 

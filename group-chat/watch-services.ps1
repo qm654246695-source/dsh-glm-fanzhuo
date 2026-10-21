@@ -42,6 +42,15 @@ function Get-PortOwner([int]$port) {
   return @($res | Select-Object -Unique)
 }
 
+# On this box TcpClient sometimes "connects" to a closed local port (41235 was down, ConnectAsync returned true),
+# so liveness must be proven by a real HTTP answer, not by a TCP connect.
+function Test-Http([int]$port, [int]$timeoutSec = 2) {
+  try {
+    $r = Invoke-WebRequest ('http://127.0.0.1:' + $port + '/health') -TimeoutSec $timeoutSec -UseBasicParsing -ErrorAction Stop
+    return [bool]($r.StatusCode -eq 200)
+  } catch { return $false }
+}
+
 # A real 1-token generation. True only if the model actually answers.
 function Test-Gen([int]$timeoutSec = 40) {
   $body = '{"model":"glm-local","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":false}'
@@ -80,6 +89,20 @@ function Start-Services([switch]$Force) {
   catch { L ('start failed: ' + $_.Exception.Message) }
 }
 
+# Suzheng serve (41235, F:\DSH domain): no one shouts when it dies, the room just goes vague.
+$script:lastSuzheng = [datetime]::MinValue
+function Start-Suzheng {
+  $now = Get-Date
+  $ago = 9999
+  if ($script:lastSuzheng -is [datetime]) { $ago = ($now - $script:lastSuzheng).TotalSeconds }
+  if ($ago -lt 60) { L ('suzheng start skipped: launched ' + [int]$ago + 's ago'); return }
+  $script:lastSuzheng = $now
+  try {
+    Start-Process -FilePath 'wscript.exe' -ArgumentList '"F:\DSH\tools\start-suzheng.vbs"' -WindowStyle Hidden | Out-Null
+    L 'suzheng serve down -> start-suzheng.vbs'
+  } catch { L ('suzheng start failed: ' + $_.Exception.Message) }
+}
+
 # Kill the model server (only if the pid really is local_glm_server) and relaunch.
 function Restart-9B([string]$why) {
   $pids = Get-PortOwner 11434
@@ -109,11 +132,12 @@ function Restart-9B([string]$why) {
 if ($Once) {
   $ok9 = Test-Port 11434
   $okc = Test-Port 41300
+  $oksz = Test-Http 41235
   $busy = Test-ServeBusy
   $gen = 'not-run'
   if ($ok9) { if (Test-Gen 40) { $gen = 'ok' } else { $gen = 'FAILED' } }
-  L ('selftest: 9B=' + $ok9 + ' chat=' + $okc + ' busy=' + $busy + ' gen=' + $gen)
-  Write-Output ('selftest: 9B=' + $ok9 + ' chat=' + $okc + ' busy=' + $busy + ' gen=' + $gen)
+  L ('selftest: 9B=' + $ok9 + ' chat=' + $okc + ' suzheng=' + $oksz + ' busy=' + $busy + ' gen=' + $gen)
+  Write-Output ('selftest: 9B=' + $ok9 + ' chat=' + $okc + ' suzheng=' + $oksz + ' busy=' + $busy + ' gen=' + $gen)
   exit 0
 }
 
@@ -157,6 +181,9 @@ $rounds = 0
 while ($true) {
   $rounds++
   $down = @()
+  # Suzheng hands (41235): started through services.vbs, whose bat self-checks the port first.
+  # (so an already-listening 41235 does not spawn a second serve on 41236).
+  if (-not (Test-Http 41235)) { $down += 'suzheng:41235' }
   if (-not (Test-Port 11434)) { $down += '9B:11434' }
   if (-not (Test-Port 41300)) { $down += 'chat:41300' }
   if ($down.Count -gt 0) {
@@ -190,3 +217,4 @@ while ($true) {
     Start-Sleep -Seconds 20
   }
 }
+
