@@ -85,7 +85,9 @@ function readBackend() {
 /** 本地 9B 起来没有。 */
 async function localUp() {
   const h = await probe(LOCAL_PORT, 900);
-  return !!(h && h.ok);
+  // python 小服务回 {"ok":true,...}；llama.cpp 的 llama-server 回 {"status":"ok"}（加载中为 503）。
+  // 两种都算活着，否则换成 llama.cpp 后面板会误判「本地没起来」而退回云端。
+  return !!(h && (h.ok === true || h.status === 'ok'));
 }
 
 function probe(port, timeoutMs = 1200) {

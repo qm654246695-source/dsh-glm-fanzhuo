@@ -1,8 +1,13 @@
 @echo off
-rem Start local GLM (9B on H: drive) as an OpenAI-compatible server. ASCII only.
-set HF_DEACTIVATE_ASYNC_LOAD=1
-set HF_HUB_OFFLINE=1
-set TRANSFORMERS_OFFLINE=1
-if not exist H:\GLM\logs mkdir H:\GLM\logs
-cd /d H:\GLM\agent
-H:\GLM\venv\Scripts\python.exe local_glm_server.py --quant bnb4 --port 11434 --max-new 512 >> H:\GLM\logs\local-glm.log 2>&1
+rem Local 9B backend dispatcher (added 2026-10-21). ASCII only.
+rem Which backend: H:\GLM\agent\.backend  ->  "llamacpp" (llama.cpp CUDA) or "python" (old transformers+bnb4).
+rem Both listen on the same OpenAI-compatible endpoint 127.0.0.1:11434, model alias glm-local,
+rem so nothing else (panel / group chat / CLI / watchdog) needs to know which one is running.
+set BACKEND=python
+if exist "H:\GLM\agent\.backend" set /p BACKEND=<"H:\GLM\agent\.backend"
+set BACKEND=%BACKEND: =%
+if /i "%BACKEND%"=="llamacpp" (
+  call "H:\GLM\agent\start-local-glm-llamacpp.bat"
+) else (
+  call "H:\GLM\agent\start-local-glm-python.bat"
+)

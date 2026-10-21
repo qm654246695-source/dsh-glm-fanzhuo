@@ -401,6 +401,9 @@ function buildBody(model, messages, opts = {}) {
   const local = opts.local ?? isLocal;
   const body = { model, messages, max_tokens: opts.max || 2048 };
   if (opts.tools !== false) body.tools = TOOLS;
+  // 本地 llama.cpp 的 tool parser 会「并行调用」同一个工具直到 max_tokens（实测 2026-10-21），
+  // 必须显式禁掉；旧的 python 后端不认这个字段，加了也无害。
+  if (local && opts.tools !== false) body.parallel_tool_calls = false;
   // 本地后端不认 thinking / reasoning_effort
   if (!local && opts.think === false) body.thinking = { type: 'disabled' };
   if (!local && opts.effort) body.reasoning_effort = opts.effort;
@@ -846,7 +849,7 @@ function startServer(preferredPort) {
       if (p === '/models') {
         // 后端只有一个：本地就跑她自己那 9B，云端才给这几档预设。
         const presets = isLocal
-          ? [{ id: 'glm-local', label: '本地 9B（~19 tok/s）', think: false, effort: null }]
+          ? [{ id: 'glm-local', label: '本地 9B（~105 tok/s）', think: false, effort: null }]
           : [
             { id: 'glm-5.3-flash', label: 'GLM-5.3-flash（默认·带思考）', think: true, effort: 'high' },
             { id: 'glm-5.2', label: 'GLM-5.2（快·关思考）', think: false, effort: null },

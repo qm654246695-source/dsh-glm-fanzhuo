@@ -95,7 +95,8 @@ function Restart-9B([string]$why) {
     if ($p -eq $PID -or $p -eq $par) { L ('9B: skip own pid ' + $p); continue }
     $cl = ''
     try { $ci = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $p); if ($ci) { $cl = '' + $ci.CommandLine } } catch {}
-    if ($cl -notmatch 'local_glm_server') { L ('9B: pid ' + $p + ' is not the model server, skip') ; continue }
+    # 2026-10-21 backend switch: python local_glm_server OR llama.cpp llama-server.
+    if ($cl -notmatch 'local_glm_server|llama-server') { L ('9B: pid ' + $p + ' is not the model server, skip') ; continue }
     try { Stop-Process -Id $p -Force -ErrorAction Stop; $killed += $p }
     catch { L ('9B: kill ' + $p + ' failed: ' + $_.Exception.Message) }
   }
